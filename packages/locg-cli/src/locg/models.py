@@ -174,6 +174,44 @@ def extract_series(li: Tag) -> dict[str, Any]:
     }
 
 
+def _extract_story_count(soup: BeautifulSoup) -> int:
+    """Count unique comic issues linked from Story Breakdown entries.
+
+    LOCG's overview row (for example, "19 Stories") is not an individual
+    story. A breakdown entry qualifies when its metadata contains the word
+    "Story" as a whole word, including variants such as "Text Story" and
+    "Story (Recolor / Remaster)". Linked issue IDs are deduplicated across
+    entries. If no qualifying issue is linked, fall back to one story.
+    """
+    section = soup.find(id="stories")
+    if section is None:
+        return 1
+
+    issue_ids: set[int] = set()
+    for item in section.find_all("details", class_="story-item", recursive=False):
+        if "story-item-overview" in item.get("class", []):
+            continue
+
+        summary = item.find("summary")
+        metadata = summary.find("div", class_="copy-really-small") if summary else None
+        metadata_text = metadata.get_text(" ", strip=True) if metadata else ""
+        if not re.search(r"\bstory\b", metadata_text, re.IGNORECASE):
+            continue
+
+        # The issue link may be outside the metadata div (e.g. wrapped around
+        # the cover image), but related-comic links can appear in the expanded
+        # details body. Restrict links to the summary row to avoid counting
+        # those related collections as story issues.
+        if summary is None:
+            continue
+        for link in summary.find_all("a", href=True):
+            match = re.match(r"^/comic/(\d+)(?:/|$)", link["href"])
+            if match:
+                issue_ids.add(int(match.group(1)))
+
+    return len(issue_ids) if issue_ids else 1
+
+
 def extract_comic_lists(soup: BeautifulSoup) -> dict[str, Any]:
     """Extract only comic ID, name, and list membership from a comic detail page.
 
@@ -300,6 +338,9 @@ def extract_comic_detail(soup: BeautifulSoup) -> dict[str, Any]:
             m = re.search(r"([\d,]+)\s*Rating", text)
             if m:
                 result["rating_count"] = int(m.group(1).replace(",", ""))
+
+    # Story Breakdown count
+    result["story_count"] = _extract_story_count(soup)
 
     # List membership (user-specific, requires authentication)
     result["lists"] = _parse_list_membership(soup)

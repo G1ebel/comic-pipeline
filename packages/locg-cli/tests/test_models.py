@@ -418,3 +418,91 @@ def test_extract_my_details_ignores_visible_selected_markup(comic_detail_my_deta
     # The correct value (from data-initial on the <select>) is "8.5".
     assert details["grading"] != "0"
     assert details["grading"] == "8.5"
+# --- Story Breakdown tests ---
+
+
+def _story_breakdown_html(entries: str) -> str:
+    return f"""<html><head>
+    <link rel="canonical" href="https://leagueofcomicgeeks.com/comic/123/test"/>
+    </head><body><h1>Test Comic</h1>
+    <section id="stories">{entries}</section>
+    </body></html>"""
+
+
+def _story_entry(metadata: str, links: str = "", classes: str = "") -> str:
+    class_attr = f' class="story-item {classes}"' if classes else ' class="story-item"'
+    return f"""<details{class_attr}><summary>
+      <div class="copy-really-small">{metadata}</div>{links}
+    </summary></details>"""
+
+
+def test_extract_comic_detail_counts_story_entries_and_recolor_variants():
+    entries = "".join([
+        _story_entry("Jun 2002 · Story · 22 pages", '<a href="/comic/101/one">Issue</a>'),
+        _story_entry("Jul 2002 · Story (Recolor / Remaster) · 22 pages", '<a href="/comic/102/two">Issue</a>'),
+        _story_entry("Aug 2002 · Text Story · 4 pages", '<a href="/comic/103/three">Issue</a>'),
+    ])
+    detail = extract_comic_detail(BeautifulSoup(_story_breakdown_html(entries), "html.parser"))
+    assert detail["story_count"] == 3
+
+
+def test_extract_comic_detail_excludes_overview_and_non_story_types():
+    entries = "".join([
+        _story_entry("19 Stories", '<a href="/comic/999/overview">Overview</a>', "story-item-overview"),
+        _story_entry("Cover Gallery · 2 pages", '<a href="/comic/201/cover">Cover</a>'),
+        _story_entry("Introduction · 3 pages", '<a href="/comic/202/intro">Intro</a>'),
+        _story_entry("Text Article · 2 pages", '<a href="/comic/203/article">Article</a>'),
+        _story_entry("Front Matter · 1 page", '<a href="/comic/204/front">Front</a>'),
+        _story_entry("Illustration · 1 page", '<a href="/comic/205/art">Art</a>'),
+    ])
+    detail = extract_comic_detail(BeautifulSoup(_story_breakdown_html(entries), "html.parser"))
+    assert detail["story_count"] == 1
+
+
+def test_extract_comic_detail_deduplicates_issue_ids_across_entries_and_links():
+    entries = "".join([
+        _story_entry("Story · 22 pages", '<a href="/comic/301/one">One</a><a href="/comic/301/one">Duplicate</a>'),
+        _story_entry("Story (Recolor / Remaster) · 22 pages", '<a href="/comic/301/one">Same issue</a><a href="/comic/302/two">Two</a>'),
+    ])
+    detail = extract_comic_detail(BeautifulSoup(_story_breakdown_html(entries), "html.parser"))
+    assert detail["story_count"] == 2
+
+
+def test_extract_comic_detail_ignores_unlinked_story_when_linked_stories_exist():
+    entries = "".join([
+        _story_entry("Story · 22 pages"),
+        _story_entry("Story · 22 pages", '<a href="/comic/401/one">Issue</a>'),
+    ])
+    detail = extract_comic_detail(BeautifulSoup(_story_breakdown_html(entries), "html.parser"))
+    assert detail["story_count"] == 1
+
+
+def test_extract_comic_detail_falls_back_to_one_without_linked_story_issues():
+    entries = _story_entry("Story · 22 pages") + _story_entry("Text Story · 4 pages")
+    detail = extract_comic_detail(BeautifulSoup(_story_breakdown_html(entries), "html.parser"))
+    assert detail["story_count"] == 1
+
+
+def test_extract_comic_detail_falls_back_to_one_when_stories_section_missing():
+    html = '<html><body><h1>Test Comic</h1></body></html>'
+    detail = extract_comic_detail(BeautifulSoup(html, "html.parser"))
+    assert detail["story_count"] == 1
+
+
+def test_extract_comic_detail_ignores_related_comics_in_expanded_story_body():
+    html = _story_breakdown_html("""
+      <details class="story-item"><summary>
+        <div class="copy-really-small">Story · 26 pages</div>
+      </summary>
+      <div class="story-content"><a href="/comic/601/related-collection">Related collection</a></div>
+      </details>
+    """)
+    detail = extract_comic_detail(BeautifulSoup(html, "html.parser"))
+    assert detail["story_count"] == 1
+
+
+def test_extract_comic_lists_does_not_include_story_count():
+    entries = _story_entry("Story · 22 pages", '<a href="/comic/501/one">Issue</a>')
+    soup = BeautifulSoup(_story_breakdown_html(entries), "html.parser")
+    result = extract_comic_lists(soup)
+    assert "story_count" not in result
