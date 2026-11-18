@@ -217,7 +217,7 @@ def cmd_releases(client: LOCGClient, target_date: Optional[str] = None) -> list[
 
 def cmd_comic(client: LOCGClient, comic_id: int) -> dict[str, Any]:
     """Get full details for a specific comic."""
-    resp = client.get(f"/comic/{comic_id}/x")
+    resp = client.navigate(f"/comic/{comic_id}/x")
     if resp.status_code == 404:
         return {"error": f"Comic {comic_id} not found"}
     soup = parse_page(resp.text)
@@ -230,6 +230,202 @@ def cmd_comic_from_html(html_path: str | Path) -> dict[str, Any]:
     html = path.read_text(encoding="utf-8-sig")
     soup = parse_page(html)
     return extract_comic_detail(soup)
+
+
+def cmd_collection_parse_html(html_path: str | Path) -> list[dict[str, Any]]:
+    """Parse all collection entries from a locally saved LOCG HTML page."""
+    path = Path(html_path).expanduser()
+    html = path.read_text(encoding="utf-8-sig")
+    soup = BeautifulSoup(html, "html.parser")
+    items = soup.find_all("li", class_="issue")
+    return [extract_issue(item) for item in items]
+
+
+def cmd_collection_fetch_breakdowns(
+    client: LOCGClient,
+    input_path: str | Path,
+    output_path: str | Path,
+    limit: int = 5,
+) -> dict[str, Any]:
+    """Fetch Story Breakdown data for up to 500 unique collection comic pages.
+
+    Successful records are persisted after each page. On resume, successful
+    page IDs are skipped while failed/not-found records are retried. Collection
+    entry provenance is copied unchanged from the input worklist.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+        raise ValueError("--limit must be between 1 and 500")
+
+    source = Path(input_path).expanduser()
+    destination = Path(output_path).expanduser()
+    if source.resolve() == destination.resolve():
+        raise ValueError("input and output paths must be different")
+    if not destination.parent.is_dir():
+        raise ValueError(
+            f"output directory does not exist: {destination.parent}"
+        )
+
+    try:
+        source_payload = json.loads(source.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid input JSON: {exc}") from exc
+    if not isinstance(source_payload, list):
+        raise ValueError("input JSON must be a list of comic-page records")
+
+    worklist: list[dict[str, Any]] = []
+    seen_input_ids: set[int] = set()
+    for index, item in enumerate(source_payload):
+        if not isinstance(item, dict):
+            raise ValueError(f"input record {index} must be an object")
+        page_id = item.get("comic_page_id")
+        if isinstance(page_id, bool) or not isinstance(page_id, int) or page_id <= 0:
+            raise ValueError(
+                f"input record {index} has an invalid comic_page_id"
+            )
+        if page_id in seen_input_ids:
+            raise ValueError(f"duplicate comic_page_id in input: {page_id}")
+        seen_input_ids.add(page_id)
+        entries = item.get("collection_entries")
+        if not isinstance(entries, list) or not entries:
+            raise ValueError(
+                f"input record {index} must contain non-empty collection_entries"
+            )
+        if any(not isinstance(entry, dict) for entry in entries):
+            raise ValueError(
+                f"input record {index} contains an invalid collection entry"
+            )
+        worklist.append({
+            "comic_page_id": page_id,
+            "collection_entries": entries,
+        })
+
+    if destination.exists():
+        try:
+            payload = json.loads(destination.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"existing output JSON is invalid: {exc}") from exc
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != 1
+            or not isinstance(payload.get("records"), list)
+        ):
+            raise ValueError("existing output has an unsupported format")
+        records = payload["records"]
+    else:
+        payload = {"schema_version": 1, "records": []}
+        records = payload["records"]
+
+    records_by_id: dict[int, dict[str, Any]] = {}
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise ValueError(f"existing output record {index} must be an object")
+        page_id = record.get("comic_page_id")
+        if isinstance(page_id, bool) or not isinstance(page_id, int):
+            raise ValueError(
+                f"existing output record {index} has an invalid comic_page_id"
+            )
+        if page_id in records_by_id:
+            raise ValueError(f"duplicate comic_page_id in output: {page_id}")
+        records_by_id[page_id] = record
+
+    pending = [
+        item for item in worklist
+        if records_by_id.get(item["comic_page_id"], {}).get("status") != "success"
+    ][:limit]
+
+    # Ensure even an empty/no-op run leaves a valid, resumable output file.
+    payload["records"] = records
+    atomic_write_json(destination, payload)
+
+    attempted = 0
+    succeeded = 0
+    not_found = 0
+    failed = 0
+    stopped_on_error = False
+    total = len(pending)
+
+    for item in pending:
+        page_id = item["comic_page_id"]
+        attempted += 1
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        try:
+            detail = cmd_comic(client, page_id)
+            if "error" in detail:
+                record = {
+                    "comic_page_id": page_id,
+                    "status": "not_found",
+                    "error": detail["error"],
+                    "collection_entries": item["collection_entries"],
+                    "fetched_at": fetched_at,
+                }
+                not_found += 1
+            else:
+                issue_ids = detail.get("story_issue_ids")
+                story_count = detail.get("story_count")
+                if (
+                    not isinstance(issue_ids, list)
+                    or any(
+                        isinstance(issue_id, bool) or not isinstance(issue_id, int)
+                        for issue_id in issue_ids
+                    )
+                    or isinstance(story_count, bool)
+                    or not isinstance(story_count, int)
+                ):
+                    raise ValueError(
+                        f"comic {page_id} returned an invalid Story Breakdown payload"
+                    )
+                record = {
+                    "comic_page_id": page_id,
+                    "status": "success",
+                    "name": detail.get("name"),
+                    "story_count": story_count,
+                    "story_issue_ids": issue_ids,
+                    "collection_entries": item["collection_entries"],
+                    "fetched_at": fetched_at,
+                }
+                succeeded += 1
+        except Exception as exc:
+            record = {
+                "comic_page_id": page_id,
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "collection_entries": item["collection_entries"],
+                "fetched_at": fetched_at,
+            }
+            failed += 1
+            stopped_on_error = True
+
+        records_by_id[page_id] = record
+        payload["records"] = list(records_by_id.values())
+        payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+        atomic_write_json(destination, payload)
+
+        marker = {"success": ".", "not_found": "N", "error": "F"}[record["status"]]
+        print(marker, end="", flush=True)
+        if attempted % 50 == 0 or attempted == total or stopped_on_error:
+            percentage = attempted * 100 // total
+            print(f" [{percentage:3d}%]")
+
+        # A browser/navigation error can leave the session unsuitable for the
+        # next request. Persist it and stop; the next manual run can resume.
+        if stopped_on_error:
+            break
+
+    remaining = sum(
+        1 for item in worklist
+        if records_by_id.get(item["comic_page_id"], {}).get("status") != "success"
+    )
+    return {
+        "status": "partial" if remaining else "ok",
+        "input_count": len(worklist),
+        "attempted": attempted,
+        "succeeded": succeeded,
+        "not_found": not_found,
+        "failed": failed,
+        "remaining": remaining,
+        "output": str(destination),
+    }
 
 
 def cmd_series(client: LOCGClient, series_id: int) -> dict[str, Any]:

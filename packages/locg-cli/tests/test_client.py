@@ -288,3 +288,132 @@ def test_wrap_response_empty_body():
 
     assert result.content == b""
     assert result.text == ""
+
+@pytest.mark.parametrize(
+    ("headless", "expected"),
+    [(False, False), (True, True)],
+)
+def test_client_browser_headless_setting(headless, expected):
+    """The browser is visible by default, but headless can be enabled explicitly."""
+    mock_context = MagicMock()
+    mock_context.cookies.return_value = [{"name": "ci_session", "value": "abc123"}]
+
+    with (
+        patch("locg.client.sync_playwright") as mock_sync_pw,
+        patch("locg.client.playwright_profile_dir", return_value="/tmp/fake-profile"),
+    ):
+        mock_sync_pw.return_value.start.return_value.chromium.launch_persistent_context.return_value = mock_context
+
+        LOCGClient(headless=headless)
+
+    kwargs = (
+        mock_sync_pw.return_value.start.return_value.chromium
+        .launch_persistent_context.call_args.kwargs
+    )
+    assert kwargs["headless"] is expected
+
+
+def test_client_browser_defaults_to_visible_browser():
+    """The default constructor must launch Chrome in visible mode."""
+    mock_context = MagicMock()
+    mock_context.cookies.return_value = [{"name": "ci_session", "value": "abc123"}]
+
+    with (
+        patch("locg.client.sync_playwright") as mock_sync_pw,
+        patch("locg.client.playwright_profile_dir", return_value="/tmp/fake-profile"),
+    ):
+        mock_sync_pw.return_value.start.return_value.chromium.launch_persistent_context.return_value = mock_context
+
+        LOCGClient()
+
+    kwargs = (
+        mock_sync_pw.return_value.start.return_value.chromium
+        .launch_persistent_context.call_args.kwargs
+    )
+    assert kwargs["headless"] is False
+
+
+def test_navigate_returns_rendered_html():
+    """navigate returns the rendered page content and the original response status."""
+    client = _make_client_with_session()
+    response = MagicMock()
+    response.status = 200
+    response.url = "https://leagueofcomicgeeks.com/comic/123/example"
+    response.headers = {"content-type": "text/html"}
+
+    client._page.goto.return_value = response
+    client._page.content.return_value = "<html><body>Comic</body></html>"
+
+    result = client.navigate("/comic/123/x")
+
+    assert result.status_code == 200
+    assert result.text == "<html><body>Comic</body></html>"
+    assert result.content == b"<html><body>Comic</body></html>"
+    assert result.headers == {"content-type": "text/html"}
+    client._page.goto.assert_called_once_with(
+        "https://leagueofcomicgeeks.com/comic/123/x",
+        wait_until="domcontentloaded",
+        timeout=60000,
+    )
+    client._page.wait_for_timeout.assert_called_once_with(3000)
+
+
+def test_navigate_raises_on_http_403():
+    """A restricted page must not be returned as comic HTML."""
+    client = _make_client_with_session()
+    response = MagicMock()
+    response.status = 403
+    response.headers = {}
+    client._page.goto.return_value = response
+
+    with pytest.raises(RuntimeError, match="Access restricted.*403"):
+        client.navigate("/comic/123/x")
+
+    client._page.content.assert_not_called()
+    client._page.wait_for_timeout.assert_not_called()
+
+
+def test_navigate_raises_on_http_429():
+    """Rate limiting must be reported with the Retry-After value."""
+    client = _make_client_with_session()
+    response = MagicMock()
+    response.status = 429
+    response.headers = {"retry-after": "60"}
+    client._page.goto.return_value = response
+
+    with pytest.raises(RuntimeError, match="Rate limited.*429.*60"):
+        client.navigate("/comic/123/x")
+
+    client._page.content.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [400, 401, 500, 502, 503])
+def test_navigate_raises_on_other_http_errors(status):
+    """Other HTTP errors must not be parsed as successful comic pages."""
+    client = _make_client_with_session()
+    response = MagicMock()
+    response.status = status
+    response.headers = {}
+    client._page.goto.return_value = response
+
+    with pytest.raises(RuntimeError, match=f"HTTP {status}"):
+        client.navigate("/comic/123/x")
+
+    client._page.content.assert_not_called()
+    client._page.wait_for_timeout.assert_not_called()
+
+
+def test_navigate_returns_http_404_without_parsing():
+    """A 404 is returned to the caller for its existing not-found handling."""
+    client = _make_client_with_session()
+    response = MagicMock()
+    response.status = 404
+    response.url = "https://leagueofcomicgeeks.com/comic/123/x"
+    response.headers = {}
+    client._page.goto.return_value = response
+    client._page.content.return_value = "<html>Not found</html>"
+
+    result = client.navigate("/comic/123/x")
+
+    assert result.status_code == 404
+    assert result.text == "<html>Not found</html>"

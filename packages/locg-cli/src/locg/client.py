@@ -55,14 +55,14 @@ class LOCGClient:
     manual, user-invoked /comic:collection-sync skill.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, headless: bool = False) -> None:
         self._playwright_instance = sync_playwright().start()
         try:
             profile_dir = str(playwright_profile_dir())
             self._context = self._playwright_instance.chromium.launch_persistent_context(
                 user_data_dir=profile_dir,
                 channel="chrome",
-                headless=True,
+                headless=headless,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--no-first-run",
@@ -173,6 +173,60 @@ class LOCGClient:
             logger.warning(f"Rate limited on GET {url}, retry after {retry_after}s")
             raise Exception(f"Rate limited. Retry after {retry_after}s")
         return resp
+
+    def navigate(self, path: str) -> _PlaywrightResponse:
+        """Navigate Chrome to a LOCG page and return its rendered HTML."""
+        url = f"{BASE_URL}{path}"
+        logger.debug("NAVIGATE %s", url)
+        start = time.monotonic()
+
+        response = self._page.goto(
+            url,
+            wait_until="domcontentloaded",
+            timeout=60000,
+        )
+        if response is None:
+            raise RuntimeError(f"No HTTP response while navigating to {url}")
+
+        if response.status == 403:
+            raise RuntimeError(
+                f"Access restricted (HTTP 403) while navigating to {url}"
+            )
+
+        if response.status == 429:
+            retry_after = response.headers.get("retry-after", "unknown")
+            raise RuntimeError(
+                f"Rate limited (HTTP 429) while navigating to {url}. "
+                f"Retry after {retry_after}s"
+            )
+
+        if response.status >= 400 and response.status != 404:
+            raise RuntimeError(
+                f"HTTP {response.status} while navigating to {url}"
+            )
+
+        # Match the verified browser workflow: allow the page to finish
+        # rendering before extracting its DOM.
+        self._page.wait_for_timeout(3000)
+        html = self._page.content()
+        raw = html.encode("utf-8")
+
+        result = _PlaywrightResponse(
+            status_code=response.status,
+            text=html,
+            content=raw,
+            headers=dict(response.headers),
+        )
+
+        elapsed = time.monotonic() - start
+        logger.debug(
+            "  -> NAVIGATE %s (%s, %.2fs, %s bytes)",
+            result.status_code,
+            response.url,
+            elapsed,
+            len(raw),
+        )
+        return result
 
     def post(self, path: str, data: Optional[dict[str, Any]] = None) -> _PlaywrightResponse:
         url = f"{BASE_URL}{path}"

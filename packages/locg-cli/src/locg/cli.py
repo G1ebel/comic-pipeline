@@ -23,6 +23,8 @@ from locg.commands import (
     cmd_cache_stats,
     cmd_check_lists,
     cmd_collection,
+    cmd_collection_parse_html,
+    cmd_collection_fetch_breakdowns,
     cmd_collection_audit_metron_mismatch,
     cmd_collection_audit_pending,
     cmd_collection_audit_unscoped_lookup,
@@ -180,6 +182,33 @@ def create_parser() -> argparse.ArgumentParser:
     # collection has — live LOCG check
     p_has = coll_sub.add_parser("has", parents=[common], help="Check if a title is in your collection via LOCG (requires login)")
     p_has.add_argument("title_query", help="Title to search for (case-insensitive substring match)")
+
+    # collection parse-html — offline parsing of a saved full collection page
+    p_parse_html = coll_sub.add_parser(
+        "parse-html",
+        parents=[common],
+        help="Parse a locally saved full LOCG collection HTML page",
+    )
+    p_parse_html.add_argument("path", help="Path to the saved collection HTML file")
+
+    # collection fetch-breakdowns — manually invoked browser fetch, resumable
+    p_fetch_breakdowns = coll_sub.add_parser(
+        "fetch-breakdowns",
+        parents=[common],
+        help="Fetch Story Breakdown issue IDs for collection comic pages (max 500 per run)",
+    )
+    p_fetch_breakdowns.add_argument(
+        "--input", dest="input_path", required=True,
+        help="JSON worklist from collection parse/missing-page analysis",
+    )
+    p_fetch_breakdowns.add_argument(
+        "--output", dest="output_path", required=True,
+        help="Separate JSON file for resumable Story Breakdown results",
+    )
+    p_fetch_breakdowns.add_argument(
+        "--limit", type=int, default=5,
+        help="Maximum unique comic pages to attempt in this run (1-500; default: 5)",
+    )
 
     # collection import — local cache
     p_import = coll_sub.add_parser(
@@ -804,7 +833,7 @@ def main() -> None:
     # `audit-metron-mismatch` (BUI-501) which talks to Metron (mokkari's own
     # HTTP client), also never Chrome.
     _LOCAL_COLLECTION_SUBCMDS = {
-        "import", "export", "status", "check", "check-batch", "doctor", "record-win",
+        "parse-html", "import", "export", "status", "check", "check-batch", "doctor", "record-win",
         "audit-pending", "audit-unscoped-lookup", "audit-metron-mismatch",
         "remediate-delete", "remediate-set-copies", "rebuild-index", "backfill",
         "quarantine", "unquarantine", "authority-check",
@@ -867,7 +896,25 @@ def main() -> None:
             )
         elif args.command == "collection":
             sub_cmd = getattr(args, "collection_command", None)
-            if sub_cmd == "has":
+            if sub_cmd == "parse-html":
+                try:
+                    result = cmd_collection_parse_html(args.path)
+                except OSError as exc:
+                    die(f"cannot read HTML file '{args.path}': {exc}", code=1)
+            elif sub_cmd == "fetch-breakdowns":
+                try:
+                    result = cmd_collection_fetch_breakdowns(
+                        client,
+                        input_path=args.input_path,
+                        output_path=args.output_path,
+                        limit=args.limit,
+                    )
+                except (OSError, ValueError) as exc:
+                    die(str(exc), code=1)
+                if result.get("status") != "ok":
+                    output(result, pretty=args.pretty, fields=fields)
+                    sys.exit(1)
+            elif sub_cmd == "has":
                 result = cmd_collection_has(client, args.title_query)
             elif sub_cmd == "import":
                 result = cmd_collection_import(args.path)

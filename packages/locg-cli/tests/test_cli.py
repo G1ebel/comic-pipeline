@@ -923,3 +923,166 @@ def test_cli_comic_online_path_unchanged(monkeypatch, capsys):
 
     assert calls == [(client, 123)]
     assert json.loads(capsys.readouterr().out)["story_count"] == 7
+
+# --- Offline collection HTML CLI tests ---
+
+def test_collection_parse_html_parser_arguments():
+    parser = create_parser()
+    args = parser.parse_args(["collection", "parse-html", "collection.html"])
+
+    assert args.command == "collection"
+    assert args.collection_command == "parse-html"
+    assert args.path == "collection.html"
+
+
+def test_cli_collection_parse_html_without_client(monkeypatch, capsys, tmp_path):
+    import locg.cli
+
+    html_file = tmp_path / "collection.html"
+    html_file.write_text(
+        """
+        <!doctype html>
+        <html><body>
+          <ul>
+            <li class="issue" data-comic="1461979"
+                data-pulls="12" data-potw="0" data-community="95">
+              <a class="title" href="/comic/1461979/example-tp">Example TP</a>
+              <span class="comic-controller active" data-list="2"></span>
+            </li>
+          </ul>
+        </body></html>
+        """,
+        encoding="utf-8",
+    )
+
+    def forbidden_client():
+        raise AssertionError("LOCGClient must not be created for offline parsing")
+
+    monkeypatch.setattr(locg.cli, "LOCGClient", forbidden_client)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["locg", "collection", "parse-html", str(html_file)],
+    )
+
+    main()
+    result = json.loads(capsys.readouterr().out)
+
+    assert len(result) == 1
+    assert result[0]["id"] == 1461979
+    assert result[0]["name"] == "Example TP"
+    assert result[0]["url"] == (
+        "https://leagueofcomicgeeks.com/comic/1461979/example-tp"
+    )
+    assert result[0]["lists"]["collection"] is True
+
+
+def test_cli_collection_parse_html_missing_file_exits_1(
+    monkeypatch, capsys, tmp_path
+):
+    import locg.cli
+
+    def forbidden_client():
+        raise AssertionError("LOCGClient must not be created for offline parsing")
+
+    monkeypatch.setattr(locg.cli, "LOCGClient", forbidden_client)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["locg", "collection", "parse-html", str(tmp_path / "missing.html")],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    assert "cannot read HTML file" in capsys.readouterr().err
+
+
+
+
+# --- Resumable collection Story Breakdown CLI tests ---
+
+
+def test_collection_fetch_breakdowns_parser_arguments():
+    parser = create_parser()
+    args = parser.parse_args([
+        "collection", "fetch-breakdowns",
+        "--input", "missing-pages.json",
+        "--output", "story-breakdowns.json",
+        "--limit", "5",
+    ])
+    assert args.command == "collection"
+    assert args.collection_command == "fetch-breakdowns"
+    assert args.input_path == "missing-pages.json"
+    assert args.output_path == "story-breakdowns.json"
+    assert args.limit == 5
+
+
+def test_cli_collection_fetch_breakdowns_uses_browser_client(
+    monkeypatch, capsys, tmp_path
+):
+    import locg.cli
+
+    calls = []
+    client = object()
+
+    class FakeClient:
+        def __init__(self):
+            calls.append("client-created")
+        def close(self):
+            calls.append("client-closed")
+
+    def fake_fetch(actual_client, input_path, output_path, limit):
+        calls.append((actual_client, input_path, output_path, limit))
+        return {
+            "status": "ok", "attempted": 2, "succeeded": 2,
+            "not_found": 0, "failed": 0, "remaining": 0,
+        }
+
+    monkeypatch.setattr(locg.cli, "LOCGClient", FakeClient)
+    monkeypatch.setattr(locg.cli, "cmd_collection_fetch_breakdowns", fake_fetch)
+    monkeypatch.setattr(sys, "argv", [
+        "locg", "collection", "fetch-breakdowns",
+        "--input", str(tmp_path / "input.json"),
+        "--output", str(tmp_path / "output.json"),
+        "--limit", "2",
+    ])
+
+    main()
+    assert calls[0] == "client-created"
+    assert calls[1][0].__class__ is FakeClient
+    assert calls[1][1:] == (
+        str(tmp_path / "input.json"),
+        str(tmp_path / "output.json"),
+        2,
+    )
+    assert calls[-1] == "client-closed"
+    assert json.loads(capsys.readouterr().out)["status"] == "ok"
+
+
+def test_cli_collection_fetch_breakdowns_partial_result_exits_1(
+    monkeypatch, capsys, tmp_path
+):
+    import locg.cli
+
+    class FakeClient:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(locg.cli, "LOCGClient", FakeClient)
+    monkeypatch.setattr(
+        locg.cli,
+        "cmd_collection_fetch_breakdowns",
+        lambda *args, **kwargs: {
+            "status": "partial", "attempted": 1, "failed": 1,
+        },
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "locg", "collection", "fetch-breakdowns",
+        "--input", str(tmp_path / "input.json"),
+        "--output", str(tmp_path / "output.json"),
+    ])
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "partial"

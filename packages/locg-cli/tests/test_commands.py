@@ -3036,8 +3036,8 @@ def test_cmd_comic_from_html_matches_online_parser(tmp_path):
     html_file.write_text(html, encoding="utf-8")
 
     client = MagicMock()
-    client.get.return_value.status_code = 200
-    client.get.return_value.text = html
+    client.navigate.return_value.status_code = 200
+    client.navigate.return_value.text = html
 
     offline = cmd_comic_from_html(html_file)
     online = cmd_comic(client, 123)
@@ -3045,7 +3045,8 @@ def test_cmd_comic_from_html_matches_online_parser(tmp_path):
     assert offline == online
     assert isinstance(offline["story_count"], int)
     assert offline["story_count"] >= 1
-    client.get.assert_called_once_with("/comic/123/x")
+    client.navigate.assert_called_once_with("/comic/123/x")
+    client.get.assert_not_called()
 
 
 def test_cmd_comic_from_html_missing_file(tmp_path):
@@ -3053,3 +3054,333 @@ def test_cmd_comic_from_html_missing_file(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         cmd_comic_from_html(tmp_path / "missing.html")
+
+
+
+# --- Resumable LOCG Story Breakdown collection batch ---
+
+
+def _breakdown_worklist(path, count=3):
+    items = [
+        {
+            "comic_page_id": 1000 + index,
+            "collection_entries": [
+                {"id": 1000 + index, "name": f"Collection TP {index}"},
+                *(
+                    [{"id": 9000 + index, "name": f"Variant TP {index}"}]
+                    if index == 0 else []
+                ),
+            ],
+        }
+        for index in range(count)
+    ]
+    path.write_text(json.dumps(items), encoding="utf-8")
+    return items
+
+
+def test_collection_fetch_breakdowns_respects_limit_and_preserves_provenance(
+    tmp_path, monkeypatch, capsys
+):
+    from locg.commands import cmd_collection_fetch_breakdowns
+
+    source = tmp_path / "worklist.json"
+    destination = tmp_path / "breakdowns.json"
+    worklist = _breakdown_worklist(source, count=7)
+    calls = []
+
+    def fake_comic(client, comic_id):
+        calls.append(comic_id)
+        return {
+            "name": f"Comic {comic_id}",
+            "story_count": 2,
+            "story_issue_ids": [comic_id + 10, comic_id + 20],
+        }
+
+    monkeypatch.setattr("locg.commands.cmd_comic", fake_comic)
+    result = cmd_collection_fetch_breakdowns(
+        MagicMock(), source, destination, limit=2
+    )
+
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    assert result["status"] == "partial"
+    assert result["attempted"] == 2
+    assert result["succeeded"] == 2
+    assert result["remaining"] == 5
+    assert calls == [1000, 1001]
+    assert payload["schema_version"] == 1
+    assert payload["records"][0]["story_issue_ids"] == [1010, 1020]
+    assert payload["records"][0]["collection_entries"] == worklist[0]["collection_entries"]
+    assert len(payload["records"][0]["collection_entries"]) == 2
+    assert capsys.readouterr().out == ".. [100%]\n"
+
+
+def test_collection_fetch_breakdowns_resumes_and_skips_successful_pages(
+    tmp_path, monkeypatch
+):
+    from locg.commands import cmd_collection_fetch_breakdowns
+
+    source = tmp_path / "worklist.json"
+    destination = tmp_path / "breakdowns.json"
+    _breakdown_worklist(source, count=4)
+    destination.write_text(json.dumps({
+        "schema_version": 1,
+        "records": [
+            {"comic_page_id": 1000, "status": "success", "story_issue_ids": [1]},
+            {"comic_page_id": 1001, "status": "error", "error": "temporary"},
+        ],
+    }), encoding="utf-8")
+    calls = []
+
+    def fake_comic(client, comic_id):
+        calls.append(comic_id)
+        return {
+            "name": f"Comic {comic_id}",
+            "story_count": 1,
+            "story_issue_ids": [comic_id],
+        }
+
+    monkeypatch.setattr("locg.commands.cmd_comic", fake_comic)
+    result = cmd_collection_fetch_breakdowns(
+        MagicMock(), source, destination, limit=2
+    )
+
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    by_id = {record["comic_page_id"]: record for record in payload["records"]}
+    assert calls == [1001, 1002]
+    assert result["attempted"] == 2
+    assert by_id[1000]["story_issue_ids"] == [1]
+    assert by_id[1001]["status"] == "success"
+    assert by_id[1002]["status"] == "success"
+
+
+def test_collection_fetch_breakdowns_persists_error_and_stops(
+    tmp_path, monkeypatch, capsys
+):
+    from locg.commands import cmd_collection_fetch_breakdowns
+
+    source = tmp_path / "worklist.json"
+    destination = tmp_path / "breakdowns.json"
+    _breakdown_worklist(source, count=3)
+    calls = []
+
+    def fake_comic(client, comic_id):
+        calls.append(comic_id)
+        raise RuntimeError("Access restricted (HTTP 403)")
+
+    monkeypatch.setattr("locg.commands.cmd_comic", fake_comic)
+    result = cmd_collection_fetch_breakdowns(
+        MagicMock(), source, destination, limit=3
+    )
+
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    assert calls == [1000]
+    assert result["status"] == "partial"
+    assert result["failed"] == 1
+    assert result["remaining"] == 3
+    assert payload["records"][0]["status"] == "error"
+    assert "HTTP 403" in payload["records"][0]["error"]
+    assert capsys.readouterr().out == "F [ 33%]\n"
+
+
+
+def test_collection_fetch_breakdowns_displays_not_found_progress(
+    tmp_path, monkeypatch, capsys
+):
+    from locg.commands import cmd_collection_fetch_breakdowns
+
+    source = tmp_path / "worklist.json"
+    destination = tmp_path / "breakdowns.json"
+    _breakdown_worklist(source, count=1)
+
+    def fake_comic(client, comic_id):
+        return {"error": f"Comic {comic_id} not found"}
+
+    monkeypatch.setattr("locg.commands.cmd_comic", fake_comic)
+
+    result = cmd_collection_fetch_breakdowns(
+        MagicMock(), source, destination, limit=1
+    )
+
+    assert result["not_found"] == 1
+    assert result["remaining"] == 1
+    assert capsys.readouterr().out == "N [100%]\n"
+
+
+
+
+def test_collection_fetch_breakdowns_progress_every_50_records(
+    tmp_path, monkeypatch, capsys
+):
+    from locg.commands import cmd_collection_fetch_breakdowns
+
+    source = tmp_path / "worklist.json"
+    destination = tmp_path / "breakdowns.json"
+    _breakdown_worklist(source, count=120)
+
+    monkeypatch.setattr(
+        "locg.commands.cmd_comic",
+        lambda client, comic_id: {
+            "name": f"Comic {comic_id}",
+            "story_count": 1,
+            "story_issue_ids": [comic_id],
+        },
+    )
+
+    result = cmd_collection_fetch_breakdowns(
+        MagicMock(), source, destination, limit=120
+    )
+
+    assert result["attempted"] == 120
+    assert result["succeeded"] == 120
+    assert capsys.readouterr().out.splitlines() == [
+        "." * 50 + " [ 41%]",
+        "." * 50 + " [ 83%]",
+        "." * 20 + " [100%]",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("story_issue_ids", "123"),
+        ("story_issue_ids", [123, "456"]),
+        ("story_count", "2"),
+        ("story_count", True),
+    ],
+)
+def test_collection_fetch_breakdowns_rejects_invalid_story_payload(
+    tmp_path, monkeypatch, field, invalid_value
+):
+    from locg.commands import cmd_collection_fetch_breakdowns
+
+    source = tmp_path / "worklist.json"
+    destination = tmp_path / "breakdowns.json"
+    _breakdown_worklist(source, count=1)
+
+    detail = {
+        "name": "Test Comic",
+        "story_count": 2,
+        "story_issue_ids": [101, 102],
+    }
+    detail[field] = invalid_value
+
+    monkeypatch.setattr(
+        "locg.commands.cmd_comic",
+        lambda client, comic_id: detail,
+    )
+
+    result = cmd_collection_fetch_breakdowns(
+        MagicMock(), source, destination, limit=1
+    )
+
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    record = payload["records"][0]
+
+    assert result["failed"] == 1
+    assert result["succeeded"] == 0
+    assert result["remaining"] == 1
+    assert record["status"] == "error"
+    assert record["error_type"] == "ValueError"
+    assert "invalid Story Breakdown payload" in record["error"]
+
+
+def test_collection_fetch_breakdowns_retries_not_found_records(
+    tmp_path, monkeypatch
+):
+    from locg.commands import cmd_collection_fetch_breakdowns
+
+    source = tmp_path / "worklist.json"
+    destination = tmp_path / "breakdowns.json"
+    worklist = _breakdown_worklist(source, count=1)
+
+    destination.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "records": [
+                {
+                    "comic_page_id": 1000,
+                    "status": "not_found",
+                    "error": "Comic 1000 not found",
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    def fake_comic(client, comic_id):
+        calls.append(comic_id)
+        return {
+            "name": f"Comic {comic_id}",
+            "story_count": 1,
+            "story_issue_ids": [comic_id],
+        }
+
+    monkeypatch.setattr("locg.commands.cmd_comic", fake_comic)
+
+    result = cmd_collection_fetch_breakdowns(
+        MagicMock(), source, destination, limit=1
+    )
+
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    record = payload["records"][0]
+
+    assert calls == [1000]
+    assert result["attempted"] == 1
+    assert result["succeeded"] == 1
+    assert result["remaining"] == 0
+    assert record["status"] == "success"
+    assert record["story_issue_ids"] == [1000]
+    assert record["collection_entries"] == worklist[0]["collection_entries"]
+
+
+@pytest.mark.parametrize("limit", [0, 501, -1])
+def test_collection_fetch_breakdowns_rejects_out_of_range_limit(
+    tmp_path, limit
+):
+    from locg.commands import cmd_collection_fetch_breakdowns
+
+    source = tmp_path / "worklist.json"
+    destination = tmp_path / "breakdowns.json"
+    _breakdown_worklist(source, count=1)
+    with pytest.raises(ValueError, match="between 1 and 500"):
+        cmd_collection_fetch_breakdowns(
+            MagicMock(), source, destination, limit=limit
+        )
+
+
+def test_collection_fetch_breakdowns_accepts_maximum_limit(tmp_path, monkeypatch):
+    from locg.commands import cmd_collection_fetch_breakdowns
+
+    source = tmp_path / "worklist.json"
+    destination = tmp_path / "breakdowns.json"
+    _breakdown_worklist(source, count=1)
+
+    monkeypatch.setattr(
+        "locg.commands.cmd_comic",
+        lambda client, comic_id: {
+            "name": f"Comic {comic_id}",
+            "story_count": 1,
+            "story_issue_ids": [comic_id],
+        },
+    )
+
+    result = cmd_collection_fetch_breakdowns(
+        MagicMock(), source, destination, limit=500
+    )
+
+    assert result["attempted"] == 1
+    assert result["succeeded"] == 1
+    assert result["status"] == "ok"
+
+
+def test_collection_fetch_breakdowns_rejects_same_input_and_output_path(
+    tmp_path
+):
+    from locg.commands import cmd_collection_fetch_breakdowns
+
+    source = tmp_path / "worklist.json"
+    _breakdown_worklist(source, count=1)
+    with pytest.raises(ValueError, match="must be different"):
+        cmd_collection_fetch_breakdowns(MagicMock(), source, source)
