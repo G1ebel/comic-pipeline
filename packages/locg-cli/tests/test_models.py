@@ -514,3 +514,21 @@ def test_extract_comic_lists_does_not_include_story_count():
     result = extract_comic_lists(soup)
     assert "story_count" not in result
     assert "story_issue_ids" not in result
+
+
+def test_extract_issue_from_collection_list_markup():
+    """Collection pages put the title class directly on the anchor."""
+    html = """
+    <li class="issue" data-comic="1461979"
+        data-pulls="12" data-potw="0" data-community="95">
+      <a class="title" href="/comic/1461979/example-tp">Example TP</a>
+      <span class="comic-controller active" data-list="2"></span>
+    </li>
+    """
+    li = BeautifulSoup(html, "html.parser").find("li")
+    issue = extract_issue(li)
+
+    assert issue["id"] == 1461979
+    assert issue["name"] == "Example TP"
+    assert issue["url"] == "https://leagueofcomicgeeks.com/comic/1461979/example-tp"
+    assert issue["lists"]["collection"] is True

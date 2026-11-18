@@ -62,6 +62,8 @@ def extract_issue(li: Tag) -> dict[str, Any]:
     # Title and URL
     title_div = li.find("div", class_="title")
     title_link = title_div.find("a") if title_div else None
+    if title_link is None:
+        title_link = li.find("a", class_="title")
     name = get_text_clean(title_link)
     url = title_link["href"] if title_link and title_link.get("href") else ""
 
