@@ -444,6 +444,7 @@ def test_extract_comic_detail_counts_story_entries_and_recolor_variants():
     ])
     detail = extract_comic_detail(BeautifulSoup(_story_breakdown_html(entries), "html.parser"))
     assert detail["story_count"] == 3
+    assert detail["story_issue_ids"] == [101, 102, 103]
 
 
 def test_extract_comic_detail_excludes_overview_and_non_story_types():
@@ -457,6 +458,7 @@ def test_extract_comic_detail_excludes_overview_and_non_story_types():
     ])
     detail = extract_comic_detail(BeautifulSoup(_story_breakdown_html(entries), "html.parser"))
     assert detail["story_count"] == 1
+    assert detail["story_issue_ids"] == []
 
 
 def test_extract_comic_detail_deduplicates_issue_ids_across_entries_and_links():
@@ -466,6 +468,7 @@ def test_extract_comic_detail_deduplicates_issue_ids_across_entries_and_links():
     ])
     detail = extract_comic_detail(BeautifulSoup(_story_breakdown_html(entries), "html.parser"))
     assert detail["story_count"] == 2
+    assert detail["story_issue_ids"] == [301, 302]
 
 
 def test_extract_comic_detail_ignores_unlinked_story_when_linked_stories_exist():
@@ -475,18 +478,21 @@ def test_extract_comic_detail_ignores_unlinked_story_when_linked_stories_exist()
     ])
     detail = extract_comic_detail(BeautifulSoup(_story_breakdown_html(entries), "html.parser"))
     assert detail["story_count"] == 1
+    assert detail["story_issue_ids"] == [401]
 
 
 def test_extract_comic_detail_falls_back_to_one_without_linked_story_issues():
     entries = _story_entry("Story · 22 pages") + _story_entry("Text Story · 4 pages")
     detail = extract_comic_detail(BeautifulSoup(_story_breakdown_html(entries), "html.parser"))
     assert detail["story_count"] == 1
+    assert detail["story_issue_ids"] == []
 
 
 def test_extract_comic_detail_falls_back_to_one_when_stories_section_missing():
     html = '<html><body><h1>Test Comic</h1></body></html>'
     detail = extract_comic_detail(BeautifulSoup(html, "html.parser"))
     assert detail["story_count"] == 1
+    assert detail["story_issue_ids"] == []
 
 
 def test_extract_comic_detail_ignores_related_comics_in_expanded_story_body():
@@ -499,6 +505,7 @@ def test_extract_comic_detail_ignores_related_comics_in_expanded_story_body():
     """)
     detail = extract_comic_detail(BeautifulSoup(html, "html.parser"))
     assert detail["story_count"] == 1
+    assert detail["story_issue_ids"] == []
 
 
 def test_extract_comic_lists_does_not_include_story_count():
@@ -506,3 +513,4 @@ def test_extract_comic_lists_does_not_include_story_count():
     soup = BeautifulSoup(_story_breakdown_html(entries), "html.parser")
     result = extract_comic_lists(soup)
     assert "story_count" not in result
+    assert "story_issue_ids" not in result

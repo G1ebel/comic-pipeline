@@ -174,20 +174,21 @@ def extract_series(li: Tag) -> dict[str, Any]:
     }
 
 
-def _extract_story_count(soup: BeautifulSoup) -> int:
-    """Count unique comic issues linked from Story Breakdown entries.
+def _extract_story_issue_ids(soup: BeautifulSoup) -> list[int]:
+    """Extract unique comic issue IDs linked from Story Breakdown entries.
 
     LOCG's overview row (for example, "19 Stories") is not an individual
     story. A breakdown entry qualifies when its metadata contains the word
     "Story" as a whole word, including variants such as "Text Story" and
-    "Story (Recolor / Remaster)". Linked issue IDs are deduplicated across
-    entries. If no qualifying issue is linked, fall back to one story.
+    "Story (Recolor / Remaster)". IDs retain their first-seen order.
     """
     section = soup.find(id="stories")
     if section is None:
-        return 1
+        return []
 
-    issue_ids: set[int] = set()
+    issue_ids: list[int] = []
+    seen: set[int] = set()
+
     for item in section.find_all("details", class_="story-item", recursive=False):
         if "story-item-overview" in item.get("class", []):
             continue
@@ -198,19 +199,20 @@ def _extract_story_count(soup: BeautifulSoup) -> int:
         if not re.search(r"\bstory\b", metadata_text, re.IGNORECASE):
             continue
 
-        # The issue link may be outside the metadata div (e.g. wrapped around
-        # the cover image), but related-comic links can appear in the expanded
-        # details body. Restrict links to the summary row to avoid counting
-        # those related collections as story issues.
+        # Only links in the summary row belong to the story entry.
+        # Related collections in the expanded body must not be counted.
         if summary is None:
             continue
+
         for link in summary.find_all("a", href=True):
             match = re.match(r"^/comic/(\d+)(?:/|$)", link["href"])
             if match:
-                issue_ids.add(int(match.group(1)))
+                issue_id = int(match.group(1))
+                if issue_id not in seen:
+                    seen.add(issue_id)
+                    issue_ids.append(issue_id)
 
-    return len(issue_ids) if issue_ids else 1
-
+    return issue_ids
 
 def extract_comic_lists(soup: BeautifulSoup) -> dict[str, Any]:
     """Extract only comic ID, name, and list membership from a comic detail page.
@@ -339,8 +341,9 @@ def extract_comic_detail(soup: BeautifulSoup) -> dict[str, Any]:
             if m:
                 result["rating_count"] = int(m.group(1).replace(",", ""))
 
-    # Story Breakdown count
-    result["story_count"] = _extract_story_count(soup)
+    # Story Breakdown Issue IDs and count
+    result["story_issue_ids"] = _extract_story_issue_ids(soup)
+    result["story_count"] = len(result["story_issue_ids"]) or 1
 
     # List membership (user-specific, requires authentication)
     result["lists"] = _parse_list_membership(soup)
