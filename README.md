@@ -5,7 +5,7 @@ A **monorepo** for the comic-collecting workflow: the eBay-sniping and League-of
 ## Structure
 
 - `packages/gixen-cli/` — eBay auction sniping CLI + FastAPI server + dashboard (`gixen` console script)
-- `packages/locg-cli/` — League of Comic Geeks collection/wish-list cache (`locg` console script)
+- `packages/locg-cli/` — League of Comic Geeks CLI for comic metadata, collection management, and Story Breakdown extraction (`locg` console script)
 - `plugins/gixen-overlay/` — FastAPI routes, SQLite tables, and dashboard tab for the comic sniping workflow
 - `apps/` — standalone apps: `ebay` + `fmv` (Python), `ezship` (TypeScript)
 - `.claude/commands/comic/` — Claude Code skills for the comic workflow (`/comic:buy`, `/comic:grade`, etc.)
@@ -14,17 +14,13 @@ A **monorepo** for the comic-collecting workflow: the eBay-sniping and League-of
 
 ## Installing the Python CLIs
 
-`scripts/install.sh` `uv tool install`s every user-facing console script into
-`~/.local/bin`: `ebay-fetch`, `ebay-sold-comps`, `seller-scan` (apps/ebay),
-`comic-fmv` (apps/fmv), `gixen` (packages/gixen-cli), and `locg`
-(packages/locg-cli). Install with [uv](https://docs.astral.sh/uv/):
+`scripts/install.sh` `uv tool install`s every user-facing console script into `~/.local/bin`: `ebay-fetch`, `ebay-sold-comps`, `seller-scan` (apps/ebay), `comic-fmv` (apps/fmv), `gixen` (packages/gixen-cli), and `locg` (packages/locg-cli). Install with [uv](https://docs.astral.sh/uv/):
 
 ```sh
 ./scripts/install.sh
 ```
 
-It also removes any stale wrappers (the BUI-27 failure mode). After it finishes,
-the CLIs work from any directory:
+It also removes any stale wrappers (the BUI-27 failure mode). After it finishes, the CLIs work from any directory:
 
 ```sh
 comic-fmv --help
@@ -32,9 +28,63 @@ gixen --help
 locg --help
 ```
 
-`comic-fmv` shells out to `ebay-sold-comps` at runtime, so install both. No
-`PYTHONPATH` workaround is needed. For development against the workspace
-(running the server, the plugin, or the suites), use `uv sync --all-packages`.
+`comic-fmv` shells out to `ebay-sold-comps` at runtime, so install both. No `PYTHONPATH` workaround is needed. For development against the workspace (running the server, the plugin, or the suites), use `uv sync --all-packages`.
+
+## LOCG CLI
+
+The `locg` command-line interface provides access to [League of Comic Geeks](https://leagueofcomicgeeks.com) for searching comics, retrieving metadata, and managing collection-related data.
+
+It supports both live browser-based retrieval and offline processing of locally saved HTML pages.
+
+### Collection HTML parsing
+
+A locally saved full collection page can be parsed without launching a browser or making a request to LOCG:
+
+```sh
+locg collection parse-html collection.html > collection.json
+```
+
+The parser extracts all issue entries from the saved collection page, including comic IDs, titles, publishers, prices, store dates, cover URLs, and available list-membership information.
+
+### Story Breakdown extraction
+
+Comic detail pages can contain a **Story Breakdown** section listing the individual comic issues associated with the stories collected in that comic.
+
+The CLI extracts:
+
+- The number of stories (`story_count`)
+- The associated comic issue IDs (`story_issue_ids`)
+
+Only actual story entries are counted. Overview rows and unrelated links within expanded story entries are excluded. Issue IDs are deduplicated while preserving their original order.
+
+### Batch fetching
+
+Story Breakdown data can be retrieved for a prepared collection worklist:
+
+```sh
+locg collection fetch-breakdowns \
+  --input collection-worklist.json \
+  --output story-breakdowns.json \
+  --limit 500
+```
+
+The worklist contains one record per unique comic page, together with the corresponding collection-entry provenance.
+
+The fetcher:
+
+- Uses a real Chrome browser through Playwright to retrieve comic detail pages.
+- Supports batches of up to 500 unique comic pages per run (default: 5).
+- Persists the output after every processed page.
+- Resumes from an existing output file, skipping pages already marked as successful.
+- Retries entries previously marked as `not_found` or `error`.
+- Preserves the original collection-entry provenance in the result records.
+- Stops after a retrieval error so the browser session can be checked before continuing.
+
+The output is a versioned JSON document containing the processing status, story count, issue IDs, collection provenance, and retrieval timestamp for each comic page.
+
+Progress is printed during execution. The final summary reports the input count, attempted pages, successful results, not-found pages, failures, and remaining work.
+
+For the full command reference, installation instructions, authentication, and other LOCG functionality, see [`packages/locg-cli/README.md`](packages/locg-cli/README.md).
 
 ## Plugin: gixen-overlay
 
