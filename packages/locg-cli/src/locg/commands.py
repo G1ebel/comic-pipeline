@@ -224,6 +224,14 @@ def cmd_comic(client: LOCGClient, comic_id: int) -> dict[str, Any]:
     return extract_comic_detail(soup)
 
 
+def cmd_comic_from_html(html_path: str | Path) -> dict[str, Any]:
+    """Get comic details from a locally saved LOCG HTML page."""
+    path = Path(html_path).expanduser()
+    html = path.read_text(encoding="utf-8-sig")
+    soup = parse_page(html)
+    return extract_comic_detail(soup)
+
+
 def cmd_series(client: LOCGClient, series_id: int) -> dict[str, Any]:
     """Get series info and issue list."""
     resp = client.get("/comic/get_comics", params={

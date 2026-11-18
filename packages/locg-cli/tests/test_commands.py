@@ -3020,3 +3020,36 @@ def test_cmd_wish_list_remove_file_mode_is_600(tmp_path):
     cmd_wish_list_remove("X-Men #1")
     mode = _stat.S_IMODE(wish_list_cache_path().stat().st_mode)
     assert mode == _stat.S_IRUSR | _stat.S_IWUSR
+
+
+# --- Offline comic HTML tests ---
+
+def test_cmd_comic_from_html_matches_online_parser(tmp_path):
+    from pathlib import Path
+    from locg.commands import cmd_comic, cmd_comic_from_html
+
+    html = (
+        Path(__file__).parent / "fixtures" / "comic_detail.html"
+    ).read_text(encoding="utf-8")
+
+    html_file = tmp_path / "comic.html"
+    html_file.write_text(html, encoding="utf-8")
+
+    client = MagicMock()
+    client.get.return_value.status_code = 200
+    client.get.return_value.text = html
+
+    offline = cmd_comic_from_html(html_file)
+    online = cmd_comic(client, 123)
+
+    assert offline == online
+    assert isinstance(offline["story_count"], int)
+    assert offline["story_count"] >= 1
+    client.get.assert_called_once_with("/comic/123/x")
+
+
+def test_cmd_comic_from_html_missing_file(tmp_path):
+    from locg.commands import cmd_comic_from_html
+
+    with pytest.raises(FileNotFoundError):
+        cmd_comic_from_html(tmp_path / "missing.html")

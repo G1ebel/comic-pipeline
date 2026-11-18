@@ -41,6 +41,7 @@ from locg.commands import (
     cmd_collection_status,
     cmd_collection_unquarantine,
     cmd_comic,
+    cmd_comic_from_html,
     cmd_creator_run_lookup,
     cmd_find,
     cmd_login,
@@ -146,7 +147,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     # comic
     p = sub.add_parser("comic", parents=[common], help="Get comic details")
-    p.add_argument("id", type=int, help="Comic ID")
+    p.add_argument("id", type=int, nargs="?", help="Comic ID")
+    p.add_argument("--html", metavar="FILE", help="Read comic details from a local HTML file")
 
     # series
     p = sub.add_parser("series", parents=[common], help="Get series details and issue list")
@@ -763,6 +765,9 @@ def main() -> None:
         parser.print_help(sys.stderr)
         sys.exit(2)
 
+    if args.command == "comic" and ((args.id is None) == (args.html is None)):
+        parser.error("provide either a Comic ID or --html FILE")
+
     # Use pre-scanned values (handles both `locg --pretty releases` and `locg releases --pretty`)
     args.pretty = pretty
     args.debug = debug
@@ -825,6 +830,7 @@ def main() -> None:
         or (_collection_sub in _LOCAL_COLLECTION_SUBCMDS)
         or _wish_list_cached
         or _wish_list_add
+        or (args.command == "comic" and getattr(args, "html", None) is not None)
         or args.command == "creator-run"
         or args.command == "resolve-year"
     )
@@ -842,7 +848,13 @@ def main() -> None:
         elif args.command == "releases":
             result = cmd_releases(client, args.date)
         elif args.command == "comic":
-            result = cmd_comic(client, args.id)
+            if args.html:
+                try:
+                    result = cmd_comic_from_html(args.html)
+                except OSError as exc:
+                    die(f"cannot read HTML file '{args.html}': {exc}", code=1)
+            else:
+                result = cmd_comic(client, args.id)
         elif args.command == "series":
             result = cmd_series(client, args.id)
         elif args.command == "find":

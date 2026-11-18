@@ -828,3 +828,98 @@ def test_rebuild_index_non_ok_status_exits_1(monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc_info:
         main()
     assert exc_info.value.code == 1
+
+
+# --- Offline comic CLI tests ---
+
+def test_comic_html_parser_arguments():
+    parser = create_parser()
+
+    offline = parser.parse_args(["comic", "--html", "comic.html"])
+    assert offline.id is None
+    assert offline.html == "comic.html"
+
+    online = parser.parse_args(["comic", "123"])
+    assert online.id == 123
+    assert online.html is None
+
+
+def test_cli_comic_html_without_client(monkeypatch, capsys, tmp_path):
+    from pathlib import Path
+    import locg.cli
+
+    fixture = Path(__file__).parent / "fixtures" / "comic_detail.html"
+    html_file = tmp_path / "comic.html"
+    html_file.write_bytes(fixture.read_bytes())
+
+    def forbidden_client():
+        raise AssertionError("LOCGClient must not be created offline")
+
+    monkeypatch.setattr(locg.cli, "LOCGClient", forbidden_client)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["locg", "comic", "--html", str(html_file),
+         "--fields", "story_count"]
+    )
+
+    main()
+    result = json.loads(capsys.readouterr().out)
+    assert isinstance(result["story_count"], int)
+    assert result["story_count"] >= 1
+    assert set(result) == {"story_count"}
+
+
+def test_cli_comic_html_missing_file_exits_1(monkeypatch, capsys, tmp_path):
+    import locg.cli
+
+    def forbidden_client():
+        raise AssertionError("LOCGClient must not be created offline")
+
+    monkeypatch.setattr(locg.cli, "LOCGClient", forbidden_client)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["locg", "comic", "--html", str(tmp_path / "missing.html")]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+
+
+@pytest.mark.parametrize("arguments", [
+    ["comic"],
+    ["comic", "123", "--html", "comic.html"],
+])
+def test_cli_comic_requires_one_input(monkeypatch, arguments):
+    monkeypatch.setattr(sys, "argv", ["locg", *arguments])
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 2
+
+
+def test_cli_comic_online_path_unchanged(monkeypatch, capsys):
+    import locg.cli
+
+    class FakeClient:
+        def close(self):
+            pass
+
+    client = FakeClient()
+    calls = []
+
+    monkeypatch.setattr(locg.cli, "LOCGClient", lambda: client)
+
+    def fake_comic(received_client, comic_id):
+        calls.append((received_client, comic_id))
+        return {"story_count": 7}
+
+    monkeypatch.setattr(locg.cli, "cmd_comic", fake_comic)
+    monkeypatch.setattr(sys, "argv", ["locg", "comic", "123"])
+
+    main()
+
+    assert calls == [(client, 123)]
+    assert json.loads(capsys.readouterr().out)["story_count"] == 7
